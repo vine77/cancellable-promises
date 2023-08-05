@@ -54,6 +54,10 @@ class AbortablePromise<T> {
       this.#abortController.abort();
     }
   }
+
+  get abortSignal(): AbortSignal {
+    return this.#abortController.signal;
+  }
 }
 
 /** Fake BLE SDK example */
@@ -64,12 +68,14 @@ enum TestType {
 
 class Ble {
   sendRequest(testType: TestType) {
-    return new AbortablePromise((resolve, reject) => {
+    const abortablePromise = new AbortablePromise((resolve, reject) => {
+      let timerId: number;
+
       const operation = async () => {
         try {
           // Simulate the BLE operation
           const bleData = await new Promise((res) => {
-            setTimeout(() => {
+            timerId = setTimeout(() => {
               console.log('end of BLE operation');
               res({ data: 50, testType });
             }, 3000);
@@ -85,7 +91,16 @@ class Ble {
       };
 
       operation();
+
+      // Listen for the abort event
+      abortablePromise.abortSignal.addEventListener('abort', () => {
+        // Clear the timeout simulating the BLE operation
+        clearTimeout(timerId);
+        console.log('BLE operation cancelled');
+      });
     });
+
+    return abortablePromise;
   }
 }
 
