@@ -13,12 +13,26 @@ class AbortablePromise<T> {
   #promise: Promise<T>;
 
   constructor(
+    signal: AbortSignal,
     executor: (
       resolve: (value: T | PromiseLike<T>) => void,
       reject: (reason?: any) => void,
     ) => void,
   ) {
     this.#abortController = new AbortController();
+
+    // copy the aborted status from the given signal
+    if (signal.aborted) {
+      this.#abortController.abort();
+    }
+
+    // listen to the abort event from the given signal
+    signal.addEventListener('abort', () => {
+      if (!this.#abortController.signal.aborted) {
+        this.#abortReason = 'Promise was aborted.';
+        this.#abortController.abort();
+      }
+    });
 
     this.#promise = new Promise<T>((resolve, reject) => {
       this.#abortController.signal.addEventListener('abort', () => {
@@ -47,17 +61,6 @@ class AbortablePromise<T> {
   finally(onfinally?: (() => void) | undefined): Promise<T> {
     return this.#promise.finally(onfinally);
   }
-
-  abort(reason: string = 'Promise was aborted.') {
-    if (!this.#abortController.signal.aborted) {
-      this.#abortReason = reason;
-      this.#abortController.abort();
-    }
-  }
-
-  get abortSignal(): AbortSignal {
-    return this.#abortController.signal;
-  }
 }
 
 /** Fake BLE SDK example */
@@ -67,37 +70,40 @@ enum TestType {
 }
 
 class Ble {
-  sendRequest(testType: TestType) {
-    const abortablePromise = new AbortablePromise((resolve, reject) => {
-      let timerId: number;
+  sendRequest(testType: TestType, abortController: AbortController) {
+    let timerId: NodeJS.Timeout;
 
-      const operation = async () => {
-        try {
-          // Simulate the BLE operation
-          const bleData = await new Promise((res) => {
-            timerId = setTimeout(() => {
-              console.log('end of BLE operation');
-              res({ data: 50, testType });
-            }, 3000);
-          });
+    const abortablePromise = new AbortablePromise(
+      abortController.signal,
+      (resolve, reject) => {
+        const operation = async () => {
+          try {
+            // Simulate the BLE operation
+            const bleData = await new Promise((res) => {
+              timerId = setTimeout(() => {
+                console.log('end of BLE operation');
+                res({ data: 50, testType });
+              }, 3000);
+            });
 
-          resolve(bleData);
-        } catch (error) {
-          reject({
-            errorType: 'OPERATION_ERROR',
-            description: error,
-          });
-        }
-      };
+            resolve(bleData);
+          } catch (error) {
+            reject({
+              errorType: 'OPERATION_ERROR',
+              description: error,
+            });
+          }
+        };
 
-      operation();
+        operation();
+      },
+    );
 
-      // Listen for the abort event
-      abortablePromise.abortSignal.addEventListener('abort', () => {
-        // Clear the timeout simulating the BLE operation
-        clearTimeout(timerId);
-        console.log('BLE operation cancelled');
-      });
+    // Listen for the abort event
+    abortController.signal.addEventListener('abort', () => {
+      // Clear the timeout simulating the BLE operation
+      clearTimeout(timerId);
+      console.log('BLE operation cancelled');
     });
 
     return abortablePromise;
@@ -108,9 +114,10 @@ class Ble {
 async function app() {
   try {
     const ble = new Ble();
-    const request = ble.sendRequest(TestType.BLOOD_PRESSURE);
+    const abortController = new AbortController();
+    const request = ble.sendRequest(TestType.BLOOD_PRESSURE, abortController);
     setTimeout(() => {
-      request.abort('User initiated abort.');
+      abortController.abort();
     }, 1000);
     const response = await request;
     console.log(`Response: ${JSON.stringify(response)}`);
