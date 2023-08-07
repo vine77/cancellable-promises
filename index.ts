@@ -8,38 +8,21 @@ class AbortError extends Error {
 
 /** A cancellable promise */
 class AbortablePromise<T> {
-  #abortController: AbortController;
   #abortReason?: string;
   #promise: Promise<T>;
+  #onCancel?: () => void;
 
   constructor(
-    signal: AbortSignal,
     executor: (
       resolve: (value: T | PromiseLike<T>) => void,
       reject: (reason?: any) => void,
+      onCancel: (callback: () => void) => void,
     ) => void,
   ) {
-    this.#abortController = new AbortController();
-
-    // copy the aborted status from the given signal
-    if (signal.aborted) {
-      this.#abortController.abort();
-    }
-
-    // listen to the abort event from the given signal
-    signal.addEventListener('abort', () => {
-      if (!this.#abortController.signal.aborted) {
-        this.#abortReason = 'Promise was aborted.';
-        this.#abortController.abort();
-      }
-    });
-
     this.#promise = new Promise<T>((resolve, reject) => {
-      this.#abortController.signal.addEventListener('abort', () => {
-        reject(new AbortError(this.#abortReason ?? 'Promise was aborted.'));
+      executor(resolve, reject, (cancelFn) => {
+        this.#onCancel = cancelFn;
       });
-
-      executor(resolve, reject);
     });
   }
 
@@ -61,6 +44,16 @@ class AbortablePromise<T> {
   finally(onfinally?: (() => void) | undefined): Promise<T> {
     return this.#promise.finally(onfinally);
   }
+
+  abort(reason: string = 'Promise was aborted.') {
+    if (this.#onCancel) {
+      this.#onCancel();
+      this.#onCancel = undefined; // Ensure the cancel function can't be called more than once.
+    }
+    // We manually reject the promise after running the onCancel callback.
+    this.#abortReason = reason;
+    this.#promise.catch(() => {}); // Catch the rejection to avoid unhandled rejection error.
+  }
 }
 
 /** Fake BLE SDK example */
@@ -70,43 +63,35 @@ enum TestType {
 }
 
 class Ble {
-  sendRequest(testType: TestType, abortController: AbortController) {
-    let timerId: NodeJS.Timeout;
+  sendRequest(testType: TestType) {
+    return new AbortablePromise((resolve, reject, onCancel) => {
+      let timerId: number;
 
-    const abortablePromise = new AbortablePromise(
-      abortController.signal,
-      (resolve, reject) => {
-        const operation = async () => {
-          try {
-            // Simulate the BLE operation
-            const bleData = await new Promise((res) => {
-              timerId = setTimeout(() => {
-                console.log('end of BLE operation');
-                res({ data: 50, testType });
-              }, 3000);
-            });
+      onCancel(() => {
+        clearTimeout(timerId);
+        console.log('BLE operation cancelled');
+        reject(new AbortError('Promise was aborted.'));
+      });
 
-            resolve(bleData);
-          } catch (error) {
-            reject({
-              errorType: 'OPERATION_ERROR',
-              description: error,
-            });
-          }
-        };
+      const operation = async () => {
+        try {
+          const bleData = await new Promise((res) => {
+            timerId = setTimeout(() => {
+              console.log('BLE operation finished');
+              res({ data: 50, testType });
+            }, 3000);
+          });
+          resolve(bleData);
+        } catch (error) {
+          reject({
+            errorType: 'OPERATION_ERROR',
+            description: error,
+          });
+        }
+      };
 
-        operation();
-      },
-    );
-
-    // Listen for the abort event
-    abortController.signal.addEventListener('abort', () => {
-      // Clear the timeout simulating the BLE operation
-      clearTimeout(timerId);
-      console.log('BLE operation cancelled');
+      operation();
     });
-
-    return abortablePromise;
   }
 }
 
@@ -114,10 +99,9 @@ class Ble {
 async function app() {
   try {
     const ble = new Ble();
-    const abortController = new AbortController();
-    const request = ble.sendRequest(TestType.BLOOD_PRESSURE, abortController);
+    const request = ble.sendRequest(TestType.BLOOD_PRESSURE);
     setTimeout(() => {
-      abortController.abort();
+      request.abort('User initiated abort.');
     }, 1000);
     const response = await request;
     console.log(`Response: ${JSON.stringify(response)}`);
